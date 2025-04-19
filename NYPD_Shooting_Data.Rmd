@@ -1,0 +1,242 @@
+---
+title: "NYPD Shooting Data (Historic)"
+author: "Anonymous Learner"
+date: "2025-03-29"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+library(tidyverse)
+library(lubridate)
+```
+
+# Raw Data
+
+This data set comes from the NYPD, accounting for every shooting incident recorded in New York City from 2006 to the previous calender year, 2023. It contains information on the date, time, and location of the shooting incident, as well as information on both the victim and the perpetrator.
+
+```{r, echo=TRUE}
+Shooting_Data <- read.csv(
+  "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+summary(Shooting_Data)
+```
+
+After skimming through the data set, there were a few questions I wanted to seek answers to:
+
+1.  Do shootings occur at any particular places more often?
+2.  Do shooting occur more often during a particular time?
+
+# Tidying Data
+
+Firstly, I want to ensure that there is no duplicate data, which can be done by checking that every incident key is a unique value.
+
+```{r, echo=TRUE}
+duplicates <- Shooting_Data[duplicated(Shooting_Data$INCIDENT_KEY) | duplicated(Shooting_Data$INCIDENT_KEY, fromLast = TRUE), ]
+head(duplicates)
+```
+As there is duplicate data, I need to filter those duplicates out. 
+
+```{r, echo=TRUE}
+Shootings <- Shooting_Data %>%
+  distinct(INCIDENT_KEY, .keep_all = TRUE)
+```
+
+The OCCUR_DATE columns list data as characters, and needs to be changed the the correct date class. The original data set includes information of the latitude and longitude of where the shooting took place, as well as the x and y coordinates and a combine latitude and longitude column. I chose to remove these, as the location of the shooting is already depicted in the "Boro" column.
+
+```{r, echo= TRUE}
+Shootings <- Shootings %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  select(-X_COORD_CD, -Y_COORD_CD, -Latitude, -Longitude, -Lon_Lat) 
+head(Shootings)
+```
+
+I noticed when going through the data set that there is a lot of missing data, labeled as "UNKNOWN," "(null)," "U", or simply left blank. To make the dataset a bit easier to work with, I chose to combine all of these missing data types into one category, labeled "UNKNOWN."
+
+```{r, echo= TRUE}
+Shootings <- Shootings %>% 
+   mutate(across(where(is.character), ~na_if(., ""))) %>%  
+  mutate(across(where(is.character), ~na_if(., "U"))) %>%
+  mutate(across(where(is.character), ~replace_na(., "UNKNOWN")))  %>%
+  mutate(across(where(is.character), ~str_replace_all(., "\\(null\\)", "UNKNOWN")))
+head(Shootings)
+```
+
+\newpage
+
+Next, I wanted to look at the different categories for each column, along with the counts for each. I first started with the more general columns, such as borough and location information.
+
+```{r, echo=TRUE}
+location_data <- c("BORO", "LOC_OF_OCCUR_DESC", "LOCATION_DESC", "LOC_CLASSFCTN_DESC")
+lapply(Shootings[location_data], table)
+
+```
+
+After looking through these, I decided to combine some of the categories based on similarities, such as "Bank" and "ATM". Moreover, as there is a lot of unknown information in the LOC_CLASSFCTN_DESC, I chose to remove it and rely more so on LOCATION_DESC.
+
+```{r, echo=TRUE}
+Shootings <- Shootings %>%
+  select(-LOC_CLASSFCTN_DESC) %>%
+  mutate(LOCATION_DESC = case_when(
+    LOCATION_DESC %in% c("ATM", "BANK") ~ "ATM/BANK",
+    LOCATION_DESC %in% c("DOCTOR/DENTIST", "HOSPITAL") ~ "DOCTOR/ DENTIST/ HOSPITAL", 
+    LOCATION_DESC %in% c("CANDY STORE", "CHAIN STORE", "CLOTHING BOUTIQUE", "DEPT STORE", 
+                         "JEWELRY STORE", "PHOTO/COPY STORE", "SHOE STORE", "SMALL MERCHANT", 
+                         "STORE UNCLASSIFIED", "TELECOMM. STORE", "VARIETY STORE",
+                         "VIDEO STORE") ~ "MISC. STORE", 
+  TRUE ~ LOCATION_DESC)) 
+lapply(Shootings["LOCATION_DESC"], table)
+
+```
+
+I also wanted to look at the perpetrator and victim data.
+
+```{r, echo=TRUE}
+victim_data <- c("VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE")
+lapply(Shootings[victim_data], table)
+
+perp_data <- c("PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE")
+lapply(Shootings[perp_data], table)
+
+```
+
+In doing this, I found five age categories which seemed off to me: "1020", "1028", "224", and "1022". As there was only one count for each of these, and they did not look similar to the other age categories, I chose to get rid of them.
+
+```{r, echo=TRUE}
+
+Shootings <- Shootings %>%
+  filter(!PERP_AGE_GROUP %in% c("1028", "1020", "224")) %>%
+  filter(!VIC_AGE_GROUP %in% c("1022"))
+victim_data <- c("VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE")
+lapply(Shootings[victim_data], table)
+
+perp_data <- c("PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE")
+lapply(Shootings[perp_data], table)
+```
+
+Finally, OCCUR_TIME is stored as character type data, but in order to do anything meaningful, I needed to create a new column with time in seconds.
+
+```{r, echo=TRUE}
+
+Shootings <- Shootings %>%
+  mutate(OCCUR_TIME_seconds = as.numeric(sapply(strsplit(OCCUR_TIME, ":"), function(x) {
+    as.integer(x[1]) * 3600 + as.integer(x[2]) * 60 + as.integer(x[3])
+  })))
+```
+
+With this transformation complete, I wanted to look at the counts for four different time periods: 12 AM to 6 AM, 6 AM to 12 PM, 12 PM to 6 PM, and 6 PM to 12 AM.
+
+```{r, echo=TRUE}
+breaks <- c(0, 21600, 43200, 64800, 86400)  
+group_labels <- c("00:01-06:00", "06:01-12:00", "12:01-18:00", "18:01-24:00")  
+Shootings$Group <- cut(Shootings$OCCUR_TIME_seconds, 
+                       breaks = breaks, 
+                       labels = group_labels, 
+                       include.lowest = TRUE)
+Shootings %>%
+  count(Group)
+```
+
+# Missing Data
+
+Through the data cleaning process, I found a large amount of missing data, predominantly in the columns depicting information on the perpetrator involved in the shooting incident. This missing data could mean one of two things: 1. The perpetrator was not identified at the time this data was collected, or 2. The data is truly missing. As I cannot make assumptions to fill in this data, but I can't necessarily remove it, I chose to keep this in the data set.
+
+However, for missing data in victim information, as it is a small subset of data, I believe it is okay to remove it. The same goes for other categories where the proportion of missing data is small (>1%).
+
+```{r, echo=TRUE}
+Shootings <- Shootings %>%
+  filter(!VIC_AGE_GROUP %in% c("UNKNOWN")) %>%
+  filter(!VIC_RACE %in% c("UNKNOWN")) %>%
+  filter(!VIC_SEX %in% c("UNKNOWN")) 
+```
+
+\newpage
+
+# Analysis
+
+**Location Data**
+
+In starting this project, I first wanted to answer the question of *"Do shootings occur at any particular places more often?"*. There are many ways I can evaluate this, first by borough:
+
+```{r, echo=TRUE}
+ggplot(data=Shootings, aes(x=BORO, fill= BORO)) +
+  geom_bar(color = "black", linewidth = 0.5) + 
+  ggtitle("Shootings by Borough") +
+  xlab("Borough") +
+  ylab("Number of Shootings") 
+```
+
+Or by location description.(I chose to filter out the unknown data. as it does not provide much in the way of analysis.):
+
+```{r, echo=TRUE}
+Shootings_filtered <- Shootings %>%
+  filter(LOCATION_DESC != "UNKNOWN")
+
+location_counts <- Shootings_filtered %>%
+  count(LOCATION_DESC)
+
+ggplot(location_counts, aes(x = "", y = n, fill = LOCATION_DESC)) +
+  geom_bar(stat = "identity", width = 1, color = "black", linewidth = 0.5) + 
+  coord_polar(theta = "y") + 
+  labs(title = "Shootings by Location") +
+  theme_void() + 
+  theme(legend.title = element_blank())
+```
+
+As illustrated in these charts, shootings took place most often in Brooklyn, with the Bronx trailing behind more closely than the other three boroughs. Moreover, shootings took place most often in multiple dwelling buildings, more so in public housing than apartment buildings. While the data does give us this information, it does not give much in the way of explaining why. One could make assumptions, such as the population density being higher in these locations, or the prevalence of gang activity or lack of public resources.
+
+\newpage
+
+**Time Data**
+
+My second question I started this project with was *"Do shooting occur more often during a particular time?"*.
+
+```{r, echo=TRUE}
+ggplot(data= Shootings, aes(x= Group, fill = Group)) +
+  geom_bar() +
+  ggtitle("Shootings by Time of Day") +
+  xlab("Time") +
+  ylab("Number of Shootings")
+```
+
+
+```{r, echo=TRUE}
+Shootings <- Shootings %>%
+  mutate(OCCUR_DATE = as.Date(OCCUR_DATE),
+         Year = year(OCCUR_DATE),
+         Month = month(OCCUR_DATE)) %>%
+  distinct()
+
+daily_counts <- Shootings %>%
+  group_by(Year, OCCUR_DATE, Month) %>%
+  summarise(Daily_Count = n(), .groups = 'drop')
+
+selected_years <- c(2017, 2018, 2019, 2020, 2021, 2022, 2023)
+shootings_filtered_selected_years <- daily_counts %>%
+  filter(Year %in% selected_years)
+
+monthly_counts <- shootings_filtered_selected_years %>%
+  group_by(Year, Month) %>%
+  summarise(Monthly_Count = sum(Daily_Count), .groups = 'drop')
+
+ggplot(monthly_counts, aes(x = factor(Month, levels = 1:12), y = Monthly_Count, color = as.factor(Year), group = Year)) +
+  geom_line(size = 1) +
+  ggtitle("Monthly Shootings Over Selected Years (2019-2023)") +
+  xlab("Month") +
+  ylab("Monthly Shooting Count") +
+  scale_x_discrete(labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) +  
+  scale_color_manual(values = c("red", "dodgerblue", "green", "purple", "navyblue", "pink", "orange")) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+With these visualizations, it is evident that shootings take place most between the hours of 6:00 PM and 6:00 AM, and most often during the Summer months. The time of day trends is likely due to the decreased sunlight, making it easier to "get away" with the shooting. Similarly, the fact that shootings increase during the Summer months is probably due to the fact that the weather is warmer and thus people are less likely to be staying indoors. 
+
+\newpage
+
+## Conclusion
+
+In working with the NYPD Shooting Data, I found that incidents do follow some trends, particularly in regards to location and time of the shootings. The presence of these trends brings up the question of why these occur. This is where my own bias may have come in to play, as I made assumptions on the motivating factors for the perpetrators. This comes partially from the fact that I spent a majority of my life living in New York City, though my experience can not provide a full picture of what drives shootings in the city. I mitigated this bias by wording my analysis very carefully, making a point to state that conclusions were merely assumptions and not fact. 
+
+The data also brought forth more questions than what I initially started off with. One of these is *Is there any correlation between the perpetrators and the victims in shootings?* Another question was *Why is it that, in the last five years worth of data, 2020 had significantly higher rates of shootings than previous years?* The answer to the second question could possibly be explained in part by the Covid-19 pandemic. In theory, the lock down protocols, which went into effect around March, and eased around July, but this does not necessarily explain why the shooting incidents skyrocketed to rates higher than other years.
